@@ -62,9 +62,9 @@ def generate_tts(quote, filename):
     data = {
         "text_input": quote,
         "text_filtering": "standard",
-        "character_voice_gen": "Charles Bukowski.wav",
+        "character_voice_gen": #Desired voice,
         "narrator_enabled": "false",
-        "narrator_voice_gen": "Charles Bukowski.wav",
+        "narrator_voice_gen": #Desired voice,
         "text_not_inside": "character",
         "language": "en",
         "output_file_name": filename,
