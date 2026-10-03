@@ -17,6 +17,20 @@ from .ff import ffmpeg, duration, frame_brightness
 UA = {"User-Agent": "AutomatedVideo/2.0 (https://github.com/CodeNBucket/AutomatedVideo)"}
 COMMONS = "https://commons.wikimedia.org/w/api.php"
 STRIP_TAGS = re.compile(r"<[^>]+>")
+STOP = {"with", "from", "the", "and", "for", "into", "over", "near", "street", "photo", "video", "film",
+        "footage", "night", "view", "black", "white", "old", "new", "york"}
+
+
+def _keywords(query: str):
+    words = [w for w in re.findall(r"[a-zà-ÿ]+", query.lower()) if len(w) >= 4 and w not in STOP]
+    return words or [w for w in re.findall(r"[a-zà-ÿ]+", query.lower()) if len(w) >= 3]
+
+
+def relevant(query: str, text: str) -> bool:
+    """Full-text search also matches long descriptions (a Watergate tape for 'roadblock');
+    keep a hit only when a key word of the query is in its title or subjects."""
+    text = text.lower()
+    return any(w in text for w in _keywords(query))
 
 
 def _clean(html) -> str:
@@ -82,7 +96,7 @@ class Library:
                     url = ders[0]["src"] if ders else info.get("url")
                     if not ders and info.get("size", 0) > 400e6:
                         continue
-                if not url:
+                if not url or not relevant(query, p["title"]):
                     continue
                 out.append({
                     "id": f"commons:{p['title']}", "kind": kind, "url": url,
@@ -91,19 +105,22 @@ class Library:
                               f" | https://commons.wikimedia.org/wiki/{p['title'].replace(' ', '_')}",
                 })
             return out
-        return self._cached(f"commons|{kind}|{query}", run)
+        return self._cached(f"commons2|{kind}|{query}", run)
 
     def _archive(self, query: str):
         def run():
             q = (f"({query}) AND mediatype:(movies) AND "
                  f"(licenseurl:(*publicdomain*) OR collection:(prelinger))")
             r = requests.get("https://archive.org/advancedsearch.php",
-                             params={"q": q, "fl[]": ["identifier", "title", "licenseurl"], "rows": 8,
+                             params={"q": q, "fl[]": ["identifier", "title", "licenseurl", "subject"], "rows": 8,
                                      "output": "json"}, headers=UA, timeout=40)
             r.raise_for_status()
             out = []
             for doc in r.json().get("response", {}).get("docs", []):
                 ident = doc["identifier"]
+                subj = doc.get("subject", "")
+                if not relevant(query, f"{doc.get('title', '')} {' '.join(subj) if isinstance(subj, list) else subj}"):
+                    continue
                 m = requests.get(f"https://archive.org/metadata/{ident}", headers=UA, timeout=40).json()
                 files = [f for f in m.get("files", []) if f.get("name", "").lower().endswith(".mp4")]
                 files.sort(key=lambda f: (0 if f.get("format") in ("h.264", "h.264 IA") else 1,
@@ -124,7 +141,7 @@ class Library:
                               f" | https://archive.org/details/{ident}",
                 })
             return out
-        return self._cached(f"archive|{query}", run)
+        return self._cached(f"archive2|{query}", run)
 
     def music(self, queries):
         """A public-domain / CC instrumental from Commons, at least a minute long."""

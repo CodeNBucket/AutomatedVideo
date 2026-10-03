@@ -3,7 +3,7 @@ import math
 import random
 from pathlib import Path
 
-from .ff import ffmpeg
+from .ff import ffmpeg, duration
 
 W, H, FPS = 1920, 1080, 30
 MAX_SHOT = 6.5
@@ -48,14 +48,23 @@ def render_shot(shot, out: Path, grade: str):
         inp = ["-loop", "1", "-framerate", str(FPS), "-t", f"{dur:.3f}", "-i", str(big)]
         vf = _kenburns(dur)
     elif shot.get("kind") in ("video", "film"):
-        loop = [] if str(shot["src"]).startswith("http") else ["-stream_loop", "-1"]
-        inp = [*loop, "-ss", f"{shot['offset']:.2f}", "-i", str(shot["src"]), "-t", f"{dur:.3f}"]
-        vf = cover
+        if str(shot["src"]).startswith("http"):   # archive.org films are read in place, not downloaded
+            loop = ["-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
+                    "-rw_timeout", "30000000"]
+        else:
+            loop = ["-stream_loop", "-1"]
+        inp = [*loop, "-ss", f"{shot['offset']:.2f}", "-i", str(shot["src"])]
+        vf = "setpts=PTS-STARTPTS," + cover
     else:   # nothing found: dark moving texture so the video never breaks
         inp = ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"color=c=0x15120f:s={W}x{H}:r={FPS}"]
         vf = "noise=alls=25:allf=t,gblur=sigma=6"
-    vf += f",{grade},setsar=1,format=yuv420p"
-    ffmpeg([*inp, "-vf", vf, "-frames:v", str(max(1, round(dur * FPS))), "-an", *ENC, "-r", str(FPS), str(out)])
+    # tpad repeats the last frame if a source runs out early, so every shot has exactly its frame count
+    frames = max(1, round(dur * FPS))
+    vf += f",{grade},tpad=stop_mode=clone:stop_duration={dur + 1:.2f},setsar=1,format=yuv420p"
+    ffmpeg([*inp, "-vf", vf, "-frames:v", str(frames), "-an", *ENC, "-r", str(FPS), str(out)])
+    got = duration(out)
+    if got < (frames - 2) / FPS:
+        raise RuntimeError(f"sahne kısa çıktı: {got:.2f}s / {dur:.2f}s")
 
 
 def _xfade_batch(files, shots, out: Path):
@@ -65,12 +74,14 @@ def _xfade_batch(files, shots, out: Path):
     inputs = []
     for f in files:
         inputs += ["-i", str(f)]
-    parts, prev, acc = [], "[0:v]", 0.0
+    # same timebase, pts from zero, same pixel format: otherwise xfade stops the chain early
+    parts = [f"[{k}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={FPS},format=yuv420p[n{k}]" for k in range(len(files))]
+    prev, acc = "[n0]", 0.0
     for k in range(1, len(files)):
         acc += shots[k - 1]["own"]
         lab = f"[x{k}]"
         sh = shots[k - 1]
-        parts.append(f"{prev}[{k}:v]xfade=transition={sh['trans']}:duration={sh['td']:.3f}:offset={acc:.3f}{lab}")
+        parts.append(f"{prev}[n{k}]xfade=transition={sh['trans']}:duration={sh['td']:.3f}:offset={acc:.3f}{lab}")
         prev = lab
     ffmpeg([*inputs, "-filter_complex", ";".join(parts), "-map", prev, *ENC, str(out)])
 
@@ -126,9 +137,17 @@ def build(shots, theme, work: Path, narration: Path, total: float, music: Path |
     files = []
     for i, sh in enumerate(shots):
         f = seg_dir / f"s{i:04d}.mp4"
-        render_shot(sh, f, theme["grade"])
+        try:
+            render_shot(sh, f, theme["grade"])
+        except Exception as e:
+            print(f"  sahne {i + 1} tekrar deneniyor: {str(e).splitlines()[0]}")
+            try:
+                render_shot(sh, f, theme["grade"])
+            except Exception:
+                sh["kind"] = None   # fall back to the dark texture
+                render_shot(sh, f, theme["grade"])
         files.append(f)
-        print(f"  sahne {i + 1}/{len(shots)}  {sh.get('kind', 'boş'):5s} {sh['own']:.1f}s  {sh['query'][:40]}")
+        print(f"  sahne {i + 1}/{len(shots)}  {sh.get('kind') or 'boş':5s} {sh['own']:.1f}s  {sh['query'][:40]}")
 
     batch_files = []
     for b in range(0, len(files), BATCH):
@@ -143,7 +162,7 @@ def build(shots, theme, work: Path, narration: Path, total: float, music: Path |
     if subtitles and sentences:
         write_ass(sentences, work / "subs.ass", theme.get("subtitle_font", "Georgia"))
         vf = "ass=subs.ass"
-    vf += f",fade=t=in:st=0:d=0.8,fade=t=out:st={max(0, total - 1.2):.2f}:d=1.2"
+    vf += f",tpad=stop_mode=clone:stop_duration=5,fade=t=in:st=0:d=0.8,fade=t=out:st={max(0, total - 1.2):.2f}:d=1.2"
 
     inputs = ["-i", "video_only.mp4", "-i", str(narration.resolve())]
     if music:
@@ -156,5 +175,5 @@ def build(shots, theme, work: Path, narration: Path, total: float, music: Path |
     else:
         af = "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,loudnorm=I=-15:TP=-1.5[a]"
     ffmpeg([*inputs, "-filter_complex", f"[0:v]{vf}[vout];{af}", "-map", "[vout]", "-map", "[a]",
-            *ENC, "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.2f}", "-movflags", "+faststart",
+            *ENC, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{total:.2f}", "-movflags", "+faststart",
             str(out.resolve())], cwd=work)
