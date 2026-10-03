@@ -1,0 +1,7 @@
+requests
+numpy
+soundfile
+kokoro-onnx>=0.4
+edge-tts
+piper-tts
+imageio-ffmpeg
